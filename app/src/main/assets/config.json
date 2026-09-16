@@ -1,0 +1,51 @@
+{
+  "log": {
+    "loglevel": "warning",
+    "access": "logs/access.log",
+    "error": "logs/error.log"
+  },
+  "inbounds": [
+  ],
+  "outbounds": [
+    {
+      "protocol": "vmess",
+      "settings": {
+        "vnext": [
+          {
+            "address": "freecdn.jp2.cloud.985996.xyz",
+            "port": 28709,
+            "users": [
+              {
+                "id": "a306096d-d8f2-34e4-88a8-98e184d76899",
+                "alterId": 0,
+                "security": "auto"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": "mirrors.8du.ru",
+          "fingerprint": "chrome"
+        },
+        "wsSettings": {
+          "path": "/live/391/index.m3u8?ed=2560",
+          "headers": {
+            "Host": "mirrors.8du.ru"
+          }
+        }
+      }
+    },
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    }
+  ],
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": []
+  }
+}
