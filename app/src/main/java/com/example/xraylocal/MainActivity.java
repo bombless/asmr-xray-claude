@@ -19,6 +19,7 @@ import android.widget.EditText;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import android.widget.ScrollView;
 import android.view.ViewGroup;
 import android.view.Gravity;
 
@@ -43,6 +44,9 @@ import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
+import javax.net.ssl.SSLPeerUnverifiedException;
+import java.security.cert.Certificate;
+import java.security.Principal;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
@@ -71,6 +75,7 @@ public class MainActivity extends Activity {
 
     private WebView web;
     private TextView statusView;
+    private TextView responseView;
     private Button googleButton;
     private SharedPreferences prefs;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
@@ -113,6 +118,18 @@ public class MainActivity extends Activity {
         statusParams.topMargin = dp(16);
         root.addView(statusView, statusParams);
 
+        responseView = new TextView(this);
+        responseView.setTextIsSelectable(true);
+        responseView.setGravity(Gravity.TOP | Gravity.START);
+        responseView.setTextSize(12);
+        ScrollView responseScroll = new ScrollView(this);
+        responseScroll.addView(responseView, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams responseParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
+        responseParams.topMargin = dp(12);
+        root.addView(responseScroll, responseParams);
+
         setContentView(root);
         io.execute(this::startXray);
     }
@@ -122,35 +139,68 @@ public class MainActivity extends Activity {
     }
 
     private void runGoogleTest() {
+        Log.d(TAG, "GOOGLE_STEP_0 click");
         googleButton.setEnabled(false);
         statusView.setText("Dialing Google through in-process Xray...");
+        responseView.setText("");
         io.execute(() -> {
-            XraySSLSocketFactory factory = null;
-            SSLSocket ssl = null;
+            HttpsURLConnection c = null;
             try {
+                Log.d(TAG, "GOOGLE_STEP_1 waitForXray");
                 waitForXray();
+                Log.d(TAG, "GOOGLE_STEP_2 create URL");
                 final String host = "www.google.com";
-                factory = new XraySSLSocketFactory(controller);
-                Socket raw = new XraySocket(controller, host, 443);
-                ssl = (SSLSocket) factory.createSocket(raw, host, 443, true);
-                ssl.setSoTimeout(30000);
-                ssl.startHandshake();
-                if (!HttpsURLConnection.getDefaultHostnameVerifier().verify(host, ssl.getSession())) {
-                    throw new java.io.IOException("TLS hostname verification failed");
+                URL url = new URL(null, "https://" + host + "/", new java.net.URLStreamHandler() {
+                    @Override protected java.net.URLConnection openConnection(URL u) {
+                        return new XrayHttpsURLConnection(u, controller);
+                    }
+                });
+                Log.d(TAG, "GOOGLE_STEP_3 openConnection (custom HttpsURLConnection; avoids platform raw TCP)");
+                c = (HttpsURLConnection) url.openConnection();
+                Log.d(TAG, "GOOGLE_STEP_4 set XraySSLSocketFactory");
+                c.setSSLSocketFactory(new XraySSLSocketFactory(controller));
+                c.setConnectTimeout(TIMEOUT_MS);
+                c.setReadTimeout(30000);
+                c.setInstanceFollowRedirects(true);
+                c.setRequestProperty("User-Agent", "XrayLocal/1.0");
+                c.setRequestProperty("Connection", "close");
+                Log.d(TAG, "GOOGLE_STEP_5 getResponseCode");
+                int code = c.getResponseCode();
+                Log.d(TAG, "GOOGLE_STEP_6 responseCode=" + code
+                        + " message=" + c.getResponseMessage()
+                        + " url=" + c.getURL()
+                        + " location=" + c.getHeaderField("Location")
+                        + " contentType=" + c.getContentType()
+                        + " contentLength=" + c.getContentLengthLong());
+                Log.d(TAG, "GOOGLE_STEP_7 getInputStream");
+                InputStream stream = code >= 400 ? c.getErrorStream() : c.getInputStream();
+                StringBuilder body = new StringBuilder();
+                final int maxChars = 128 * 1024;
+                Log.d(TAG, "GOOGLE_STEP_8 start body read");
+                if (stream != null) {
+                    try (BufferedReader reader = new BufferedReader(
+                            new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+                        char[] buffer = new char[4096];
+                        int count;
+                        int total = 0;
+                        while (total < maxChars &&
+                                (count = reader.read(buffer, 0,
+                                        Math.min(buffer.length, maxChars - total))) != -1) {
+                            body.append(buffer, 0, count);
+                            total += count;
+                        }
+                    }
                 }
-                OutputStream out = ssl.getOutputStream();
-                out.write(("GET / HTTP/1.1\r\nHost: " + host + "\r\nUser-Agent: XrayLocal/1.0\r\nConnection: close\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
-                out.flush();
-                BufferedReader reader = new BufferedReader(new InputStreamReader(ssl.getInputStream(), StandardCharsets.ISO_8859_1));
-                String statusLine = reader.readLine();
-                if (statusLine == null) throw new java.io.IOException("empty HTTPS response");
-                int code = -1;
-                String[] parts = statusLine.split(" ", 3);
-                if (parts.length >= 2) code = Integer.parseInt(parts[1]);
                 final int responseCode = code;
+                final String html = body.toString();
+                Log.d(TAG, "GOOGLE_STEP_9 body read finished length=" + html.length());
                 runOnUiThread(() -> {
-                    statusView.setText("Google HTTPS " + responseCode + " (in-process Xray Core)");
+                    Log.d(TAG, "GOOGLE_STEP_10 update UI");
+                    statusView.setText("Google HTTPS " + responseCode
+                            + " (in-process Xray Core) · HTML " + html.length() + " chars");
+                    responseView.setText(html);
                     googleButton.setEnabled(true);
+                    Log.d(TAG, "GOOGLE_STEP_11 UI updated");
                 });
             } catch (Throwable t) {
                 Log.e(TAG, "Google in-process HTTPS failed", t);
@@ -158,12 +208,11 @@ public class MainActivity extends Activity {
                         (t.getMessage() == null ? "unknown error" : t.getMessage());
                 runOnUiThread(() -> {
                     statusView.setText("HTTPS failed: " + message);
+                    responseView.setText("");
                     googleButton.setEnabled(true);
                 });
             } finally {
-                if (ssl != null) {
-                    try { ssl.close(); } catch (Exception ignored) { }
-                }
+                if (c != null) c.disconnect();
             }
         });
     }
@@ -174,7 +223,7 @@ public class MainActivity extends Activity {
             JSONObject root = new JSONObject(readAsset("config.json"));
             JSONObject log = root.optJSONObject("log");
             if (log == null) { log = new JSONObject(); root.put("log", log); }
-            log.put("loglevel", log.optString("loglevel", "warning"));
+            log.put("loglevel", "debug");
             log.put("access", new java.io.File(getFilesDir(), "access.log").getAbsolutePath());
             log.put("error", new java.io.File(getFilesDir(), "error.log").getAbsolutePath());
             controller.startLoop(root.toString(), 0);
@@ -258,7 +307,9 @@ public class MainActivity extends Activity {
         private int soTimeout;
 
         XraySocket(CoreController controller, String host, int port) throws Exception {
+            Log.d(TAG, "CoreController.dial start " + host + ":" + port);
             this.connection = controller.dial(host + ":" + port);
+            Log.d(TAG, "CoreController.dial success " + host + ":" + port);
             this.host = host;
             this.port = port;
         }
@@ -321,6 +372,124 @@ public class MainActivity extends Activity {
         @Override public boolean getKeepAlive() { return false; }
     }
 
+    private static final class XrayHttpsURLConnection extends HttpsURLConnection {
+        private final CoreController controller;
+        private SSLSocketFactory sslFactory;
+        private SSLSocket socket;
+        private byte[] body = new byte[0];
+        private int responseCode = -1;
+        private String responseMessage = "";
+        private final java.util.LinkedHashMap<String, String> headers = new java.util.LinkedHashMap<>();
+
+        XrayHttpsURLConnection(URL url, CoreController controller) {
+            super(url);
+            this.controller = controller;
+            this.sslFactory = null;
+        }
+
+        @Override public void connect() throws java.io.IOException {
+            if (connected) return;
+            try {
+                Log.d(TAG, "XRAY_HTTP connect " + url.getHost() + ":443");
+                if (sslFactory == null) sslFactory = new XraySSLSocketFactory(controller);
+                Log.d(TAG, "XRAY_HTTP create TLS socket");
+                socket = (SSLSocket) sslFactory.createSocket(url.getHost(), 443);
+                Log.d(TAG, "XRAY_HTTP TLS socket created");
+                socket.setSoTimeout(30000);
+                Log.d(TAG, "XRAY_HTTP startHandshake");
+                socket.startHandshake();
+                Log.d(TAG, "XRAY_HTTP handshake complete");
+                if (getHostnameVerifier() != null &&
+                        !getHostnameVerifier().verify(url.getHost(), socket.getSession())) {
+                    throw new javax.net.ssl.SSLPeerUnverifiedException("Hostname not verified: " + url.getHost());
+                }
+                OutputStream out = socket.getOutputStream();
+                String path = url.getFile();
+                if (path == null || path.length() == 0) path = "/";
+                String request = "GET " + path + " HTTP/1.1\r\n" +
+                        "Host: " + url.getHost() + "\r\n" +
+                        "User-Agent: XrayLocal/1.0\r\n" +
+                        "Connection: close\r\n\r\n";
+                Log.d(TAG, "XRAY_HTTP write request");
+                out.write(request.getBytes(StandardCharsets.ISO_8859_1));
+                out.flush();
+                Log.d(TAG, "XRAY_HTTP request written; read response");
+                InputStream in = socket.getInputStream();
+                parseResponse(in);
+                connected = true;
+                Log.d(TAG, "XRAY_HTTP connected response=" + responseCode + " body=" + body.length);
+            } catch (SSLPeerUnverifiedException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new java.io.IOException("Xray HTTPS transport failed", e);
+            }
+        }
+
+        private void parseResponse(InputStream in) throws java.io.IOException {
+            BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.ISO_8859_1));
+            String status = reader.readLine();
+            if (status == null) throw new java.io.EOFException("empty HTTP response");
+            String[] parts = status.split(" ", 3);
+            if (parts.length < 2) throw new java.io.IOException("bad HTTP status: " + status);
+            responseCode = Integer.parseInt(parts[1]);
+            responseMessage = parts.length >= 3 ? parts[2] : "";
+            String line;
+            while ((line = reader.readLine()) != null && line.length() != 0) {
+                int colon = line.indexOf(':');
+                if (colon > 0) headers.put(line.substring(0, colon).trim(), line.substring(colon + 1).trim());
+            }
+            String transfer = getHeader("Transfer-Encoding");
+            String length = getHeader("Content-Length");
+            java.io.ByteArrayOutputStream data = new java.io.ByteArrayOutputStream();
+            if (transfer != null && transfer.toLowerCase(java.util.Locale.US).contains("chunked")) {
+                while (true) {
+                    String sizeLine = reader.readLine();
+                    if (sizeLine == null) break;
+                    int semi = sizeLine.indexOf(';');
+                    if (semi >= 0) sizeLine = sizeLine.substring(0, semi);
+                    int size = Integer.parseInt(sizeLine.trim(), 16);
+                    if (size == 0) { while ((line = reader.readLine()) != null && line.length() != 0) {} break; }
+                    byte[] chunk = new byte[size];
+                    int off = 0;
+                    while (off < size) { int b = reader.read(); if (b < 0) throw new java.io.EOFException(); chunk[off++] = (byte)b; }
+                    data.write(chunk);
+                    reader.readLine();
+                    if (data.size() >= 128 * 1024) break;
+                }
+            } else if (length != null) {
+                long wanted = Long.parseLong(length);
+                long remaining = Math.min(wanted, 128L * 1024L);
+                byte[] buf = new byte[4096];
+                while (remaining > 0) { int n = in.read(buf, 0, (int)Math.min(buf.length, remaining)); if (n < 0) break; data.write(buf, 0, n); remaining -= n; }
+            } else {
+                byte[] buf = new byte[4096];
+                int n; while (data.size() < 128 * 1024 && (n = in.read(buf, 0, Math.min(buf.length, 128 * 1024 - data.size()))) != -1) data.write(buf, 0, n);
+            }
+            body = data.toByteArray();
+        }
+
+        private String getHeader(String name) {
+            for (java.util.Map.Entry<String, String> e : headers.entrySet()) if (e.getKey().equalsIgnoreCase(name)) return e.getValue();
+            return null;
+        }
+        @Override public int getResponseCode() throws java.io.IOException { connect(); return responseCode; }
+        @Override public String getResponseMessage() throws java.io.IOException { connect(); return responseMessage; }
+        @Override public InputStream getInputStream() throws java.io.IOException { connect(); return new java.io.ByteArrayInputStream(body); }
+        @Override public InputStream getErrorStream() { try { connect(); return new java.io.ByteArrayInputStream(body); } catch (Exception e) { return null; } }
+        @Override public String getHeaderField(String name) { return getHeader(name); }
+        @Override public String getContentType() { return getHeader("Content-Type"); }
+        @Override public long getContentLengthLong() { try { String v = getHeader("Content-Length"); return v == null ? -1 : Long.parseLong(v); } catch (Exception e) { return -1; } }
+        @Override public String getCipherSuite() { return socket == null ? null : socket.getSession().getCipherSuite(); }
+        @Override public Certificate[] getLocalCertificates() { return socket == null ? null : socket.getSession().getLocalCertificates(); }
+        @Override public Certificate[] getServerCertificates() throws SSLPeerUnverifiedException { if (socket == null) throw new IllegalStateException("not connected"); return socket.getSession().getPeerCertificates(); }
+        @Override public Principal getPeerPrincipal() throws SSLPeerUnverifiedException { if (socket == null) throw new IllegalStateException("not connected"); return socket.getSession().getPeerPrincipal(); }
+        @Override public Principal getLocalPrincipal() { return socket == null ? null : socket.getSession().getLocalPrincipal(); }
+        @Override public void disconnect() { if (socket != null) try { socket.close(); } catch (Exception ignored) {} connected = false; }
+        @Override public boolean usingProxy() { return false; }
+        @Override public void setSSLSocketFactory(SSLSocketFactory sf) { if (sf == null) throw new IllegalArgumentException("sf == null"); sslFactory = sf; }
+        @Override public SSLSocketFactory getSSLSocketFactory() { return sslFactory; }
+    }
+
     private static final class XraySSLSocketFactory extends SSLSocketFactory {
         private final CoreController controller;
         private final SSLSocketFactory delegate;
@@ -345,7 +514,8 @@ public class MainActivity extends Activity {
         @Override public Socket createSocket(java.net.InetAddress host, int port) throws java.io.IOException { return layer(host.getHostName(), port); }
         @Override public Socket createSocket(java.net.InetAddress address, int port, java.net.InetAddress localAddress, int localPort) throws java.io.IOException { return layer(address.getHostName(), port); }
         @Override public Socket createSocket(Socket s, String host, int port, boolean autoClose) throws java.io.IOException {
-            return delegate.createSocket(s, host, port, autoClose);
+            // OkHttp reaches this overload with a plain socket; never let it bypass Xray.
+            return layer(host, port);
         }
     }
 
