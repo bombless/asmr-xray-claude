@@ -14,13 +14,19 @@ import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
-/** Settings page: Xray on/off, API base, low-quality stream, connectivity test. */
+import java.util.List;
+
+/** Settings page: Xray on/off, proxy subscription, API base, low-quality stream, connectivity test. */
 final class SettingsScreen {
     private final Activity activity;
     private final ScrollView root;
     private final TextView xrayStatus;
     private final TextView testResult;
     private final Button testButton;
+    private final EditText subUrl;
+    private final Button subUpdate;
+    private final TextView subStatus;
+    private final LinearLayout nodeList;
     private final Handler ui = new Handler(Looper.getMainLooper());
 
     private final Runnable tick = new Runnable() {
@@ -58,6 +64,46 @@ final class SettingsScreen {
             if (on) XrayCore.ensureStarted();
             refreshStatus();
         });
+
+        // --- Proxy subscription ------------------------------------------
+        LinearLayout cardSub = card(col);
+        TextView lSub = new TextView(activity);
+        lSub.setText("代理订阅");
+        lSub.setTextSize(16);
+        lSub.setTextColor(Ui.TEXT);
+        cardSub.addView(lSub);
+        cardSub.addView(note("填入订阅地址（VLESS / VMess / Trojan，需 https）后点“更新订阅”，再点选下方节点即可切换。\n"
+                + "订阅本身走系统网络直连下载，不经过 Xray。未导入订阅时使用内置默认节点。"));
+        subUrl = new EditText(activity);
+        subUrl.setSingleLine(true);
+        subUrl.setHint("https://…");
+        subUrl.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        subUrl.setText(SubscriptionStore.url());
+        cardSub.addView(subUrl, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout subRow = new LinearLayout(activity);
+        subRow.setOrientation(LinearLayout.HORIZONTAL);
+        subUpdate = new Button(activity);
+        subUpdate.setText("更新订阅");
+        subUpdate.setAllCaps(false);
+        subUpdate.setOnClickListener(v -> runSubscriptionUpdate());
+        Button subClear = new Button(activity);
+        subClear.setText("清除订阅");
+        subClear.setAllCaps(false);
+        subClear.setOnClickListener(v -> {
+            SubscriptionStore.clear();
+            subUrl.setText("");
+            XrayCore.reloadIfNodeChanged();
+            refreshNodes();
+        });
+        subRow.addView(subUpdate);
+        subRow.addView(subClear);
+        cardSub.addView(subRow);
+        subStatus = note("");
+        cardSub.addView(subStatus);
+        nodeList = new LinearLayout(activity);
+        nodeList.setOrientation(LinearLayout.VERTICAL);
+        cardSub.addView(nodeList, new LinearLayout.LayoutParams(-1, -2));
+        refreshNodes();
 
         // --- API base ----------------------------------------------------
         LinearLayout card2 = card(col);
@@ -147,6 +193,60 @@ final class SettingsScreen {
         t.setTextColor(Ui.SUB);
         t.setPadding(0, Ui.dp(activity, 6), 0, 0);
         return t;
+    }
+
+    /** Rebuilds the node list from {@link SubscriptionStore}; tapping a row selects that node. */
+    private void refreshNodes() {
+        nodeList.removeAllViews();
+        List<SubscriptionNode> nodes = SubscriptionStore.nodes();
+        SubscriptionNode selected = SubscriptionStore.selectedNode();
+        subStatus.setText(nodes.isEmpty() ? "未导入订阅，使用内置默认节点" : "共 " + nodes.size() + " 个节点，点击切换");
+        for (final SubscriptionNode n : nodes) {
+            boolean on = selected != null && n.key().equals(selected.key());
+            TextView row = new TextView(activity);
+            row.setText((on ? "● " : "○ ") + n.name + "\n    " + n.summary());
+            row.setTextSize(14);
+            row.setTextColor(on ? Ui.ACCENT : Ui.TEXT);
+            int p = Ui.dp(activity, 10);
+            row.setPadding(p, p, p, p);
+            if (on) row.setBackground(Ui.round(activity, 0x1A3F51B5, 8));
+            row.setOnClickListener(v -> {
+                SubscriptionStore.select(n);
+                XrayCore.reloadIfNodeChanged();
+                refreshNodes();
+                Toast.makeText(activity, "已选择：" + n.name, Toast.LENGTH_SHORT).show();
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+            lp.topMargin = Ui.dp(activity, 6);
+            nodeList.addView(row, lp);
+        }
+    }
+
+    private void runSubscriptionUpdate() {
+        final String url = subUrl.getText().toString().trim();
+        subUpdate.setEnabled(false);
+        subStatus.setText("更新中…");
+        Thread t = new Thread(() -> {
+            String msg;
+            boolean ok = false;
+            try {
+                int n = SubscriptionStore.update(url);
+                msg = "✔ 已更新，共 " + n + " 个节点，点击节点切换";
+                ok = true;
+            } catch (Throwable e) {
+                msg = "✘ 更新失败：" + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
+            }
+            final String out = msg;
+            final boolean success = ok;
+            activity.runOnUiThread(() -> {
+                subUpdate.setEnabled(true);
+                refreshNodes();
+                subStatus.setText(out); // after refreshNodes(), which writes its own summary line
+                if (success) XrayCore.reloadIfNodeChanged();
+            });
+        }, "sub-update");
+        t.setDaemon(true);
+        t.start();
     }
 
     private void refreshStatus() {
