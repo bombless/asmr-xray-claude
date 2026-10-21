@@ -177,11 +177,7 @@ public class MainActivity extends Activity {
     }
 
     @Override public void onBackPressed() {
-        if (!goBack()) super.onBackPressed();
+        if (!goBack()) moveTaskToBack(true); // keep playing in the background
     }
 
-    @Override protected void onDestroy() {
-        if (isFinishing()) PlayerController.get().stop();
-        super.onDestroy();
-    }
 }

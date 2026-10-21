@@ -48,4 +48,20 @@ final class ImageLoader {
             }
         });
     }
+    interface BitmapCallback { void onBitmap(Bitmap b); }
+
+    /** Fetches a bitmap (cache first) and delivers it on the main thread. */
+    static void fetch(final String url, final BitmapCallback cb) {
+        Bitmap hit = CACHE.get(url);
+        if (hit != null) { cb.onBitmap(hit); return; }
+        POOL.execute(() -> {
+            try {
+                byte[] data = Net.getBytes(url, 8 << 20);
+                Bitmap bm = BitmapFactory.decodeByteArray(data, 0, data.length);
+                if (bm == null) return;
+                CACHE.put(url, bm);
+                MAIN.post(() -> cb.onBitmap(bm));
+            } catch (Throwable ignored) { }
+        });
+    }
 }

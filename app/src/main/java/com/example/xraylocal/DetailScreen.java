@@ -205,7 +205,8 @@ final class DetailScreen implements PlayerController.Listener {
                     queue.add(n);
                 }
             }
-            PlayerController.get().playQueue(queue, start);
+            PlaybackService.requestNotificationPermission(activity);
+            PlayerController.get().playQueue(queue, start, work.title, work.circle, work.coverUrl);
         } else {
             Toast.makeText(activity, "暂不支持预览此类文件", Toast.LENGTH_SHORT).show();
         }

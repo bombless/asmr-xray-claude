@@ -38,6 +38,9 @@ final class PlayerController {
 
     private List<AsmrApi.Node> queue = new ArrayList<>();
     private int index = -1;
+    private String workTitle = "";
+    private String workCircle = "";
+    private String workCoverUrl = "";
     private MediaPlayer mp;
     private HttpMediaDataSource source;
     private boolean prepared;
@@ -59,6 +62,10 @@ final class PlayerController {
 
     // ------------------------------------------------------------ state
 
+    String workTitle() { return workTitle; }
+    String workCircle() { return workCircle; }
+    String workCoverUrl() { return workCoverUrl; }
+
     boolean hasTrack() { return index >= 0 && index < queue.size(); }
     AsmrApi.Node current() { return hasTrack() ? queue.get(index) : null; }
     boolean isLoading() { return loading; }
@@ -76,8 +83,16 @@ final class PlayerController {
     // ------------------------------------------------------------ control
 
     void playQueue(List<AsmrApi.Node> tracks, int startIndex) {
+        playQueue(tracks, startIndex, "", "", "");
+    }
+
+    void playQueue(List<AsmrApi.Node> tracks, int startIndex, String workTitle, String workCircle, String workCoverUrl) {
+        this.workTitle = workTitle != null ? workTitle : "";
+        this.workCircle = workCircle != null ? workCircle : "";
+        this.workCoverUrl = workCoverUrl != null ? workCoverUrl : "";
         queue = new ArrayList<>(tracks);
         start(startIndex);
+        PlaybackService.start(App.instance);
     }
 
     void toggle() {
@@ -106,6 +121,10 @@ final class PlayerController {
         index = -1;
         loading = false;
         error = null;
+        workTitle = "";
+        workCircle = "";
+        workCoverUrl = "";
+        PlaybackService.stop(App.instance);
         changed();
     }
 
