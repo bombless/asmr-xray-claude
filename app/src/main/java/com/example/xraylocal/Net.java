@@ -28,7 +28,7 @@ import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 
 /**
- * Minimal HTTPS/1.1 GET client. The underlying TCP socket is either an in-process Xray stream
+ * Minimal HTTPS/1.1 client (GET, plus JSON POST for login). The underlying TCP socket is either an in-process Xray stream
  * ({@link AppSettings#useXray()}) or a plain direct socket; TLS and the HTTP code are identical.
  * Supports keep-alive pooling, Range, chunked, gzip and redirects.
  */
@@ -49,12 +49,33 @@ final class Net {
 
     private Net() {}
 
+    /** Non-200 answer. {@link #status} lets callers react to 401 etc.; the message format is unchanged. */
+    static final class HttpException extends IOException {
+        final int status;
+
+        HttpException(int status, String url) {
+            super("HTTP " + status + " " + url);
+            this.status = status;
+        }
+    }
+
+    /** Status + body of an exchange where the caller wants the answer whatever the status is. */
+    static final class Result {
+        final int status;
+        final String body;
+
+        Result(int status, String body) {
+            this.status = status;
+            this.body = body;
+        }
+    }
+
     // ---------------------------------------------------------------- public API
 
     static String getText(String url, Map<String, String> headers) throws IOException {
         try (Response r = get(url, headers, true)) {
             r.armTimeout(30_000);
-            if (r.status != 200) throw new IOException("HTTP " + r.status + " " + url);
+            if (r.status != 200) throw new HttpException(r.status, url);
             return new String(r.readAll(16 << 20), StandardCharsets.UTF_8);
         }
     }
@@ -62,20 +83,41 @@ final class Net {
     static byte[] getBytes(String url, int max) throws IOException {
         try (Response r = get(url, null, false)) {
             r.armTimeout(30_000);
-            if (r.status != 200) throw new IOException("HTTP " + r.status + " " + url);
+            if (r.status != 200) throw new HttpException(r.status, url);
             return r.readAll(max);
+        }
+    }
+
+    /**
+     * POSTs a JSON body and returns the status and body whatever the status is (so the caller can read
+     * a server-side {"error": ...}). Redirects are not followed. Blocking: call from a background thread.
+     */
+    static Result postJson(String url, String json, Map<String, String> headers) throws IOException {
+        byte[] data = json.getBytes(StandardCharsets.UTF_8);
+        try (Response r = once("POST", new URL(url), headers, true, data)) {
+            r.armTimeout(30_000);
+            String text = new String(r.readAll(1 << 20), StandardCharsets.UTF_8);
+            return new Result(r.status, text);
         }
     }
 
     static Response get(String url, Map<String, String> extra, boolean gzip) throws IOException {
         String cur = url;
         for (int hop = 0; hop < 6; hop++) {
-            Response r = once(new URL(cur), extra, gzip);
+            Response r = once("GET", new URL(cur), extra, gzip, null);
             String loc = r.header("location");
             if (loc != null && (r.status == 301 || r.status == 302 || r.status == 303
                     || r.status == 307 || r.status == 308)) {
                 r.close();
-                cur = new URL(new URL(cur), loc).toString();
+                URL from = new URL(cur);
+                URL to = new URL(from, loc);
+                // Never forward credentials to a different host than the one that was asked.
+                if (extra != null && extra.containsKey("Authorization")
+                        && !from.getHost().equalsIgnoreCase(to.getHost())) {
+                    extra = new HashMap<>(extra);
+                    extra.remove("Authorization");
+                }
+                cur = to.toString();
                 continue;
             }
             return r;
@@ -166,7 +208,8 @@ final class Net {
         c.out = ssl.getOutputStream();
     }
 
-    private static Response once(URL url, Map<String, String> extra, boolean gzip) throws IOException {
+    private static Response once(String method, URL url, Map<String, String> extra, boolean gzip,
+                                 byte[] body) throws IOException {
         if (!"https".equalsIgnoreCase(url.getProtocol())) throw new IOException("Only https is supported");
         final String host = url.getHost();
         final int port = url.getPort() < 0 ? 443 : url.getPort();
@@ -182,7 +225,9 @@ final class Net {
             r.armTimeout(20_000); // covers dial + TLS + response headers
             try {
                 if (c.ssl == null) connect(c, host, port, xray);
-                c.out.write(buildRequest(url, host, port, extra, gzip).getBytes(StandardCharsets.ISO_8859_1));
+                c.out.write(buildRequest(method, url, host, port, extra, gzip,
+                        body == null ? -1 : body.length).getBytes(StandardCharsets.ISO_8859_1));
+                if (body != null) c.out.write(body);
                 c.out.flush();
                 readHead(r, c);
                 return r;
@@ -194,11 +239,12 @@ final class Net {
         }
     }
 
-    private static String buildRequest(URL url, String host, int port, Map<String, String> extra, boolean gzip) {
+    private static String buildRequest(String method, URL url, String host, int port,
+                                       Map<String, String> extra, boolean gzip, int bodyLen) {
         String path = url.getFile();
         if (path == null || path.isEmpty()) path = "/";
         StringBuilder sb = new StringBuilder(384);
-        sb.append("GET ").append(sanitize(path)).append(" HTTP/1.1\r\n");
+        sb.append(method).append(' ').append(sanitize(path)).append(" HTTP/1.1\r\n");
         sb.append("Host: ").append(port == 443 ? host : host + ":" + port).append("\r\n");
         sb.append("User-Agent: ").append(UA).append("\r\n");
         sb.append("Accept: */*\r\n");
@@ -206,6 +252,10 @@ final class Net {
         sb.append("Referer: https://asmr.one/\r\n");
         sb.append("Origin: https://asmr.one\r\n");
         sb.append("Connection: keep-alive\r\n");
+        if (bodyLen >= 0) {
+            sb.append("Content-Type: application/json\r\n");
+            sb.append("Content-Length: ").append(bodyLen).append("\r\n");
+        }
         if (extra != null) {
             for (Map.Entry<String, String> e : extra.entrySet()) {
                 sb.append(e.getKey()).append(": ").append(e.getValue()).append("\r\n");

@@ -17,6 +17,9 @@ final class AppSettings {
 
     static int rev() { return rev; }
 
+    /** Marks on-screen data stale (called on login/logout) so the works list reloads. */
+    static void bumpRev() { rev++; }
+
     /** When true every request (API, covers, audio) is dialed through the in-process Xray core. */
     static boolean useXray() { return sp().getBoolean("use_xray", true); }
 

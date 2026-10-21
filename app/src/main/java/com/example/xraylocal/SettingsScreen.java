@@ -5,6 +5,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
 import android.view.View;
+import android.view.inputmethod.EditorInfo;
 import android.widget.Button;
 import android.widget.CompoundButton;
 import android.widget.EditText;
@@ -16,10 +17,11 @@ import android.widget.Toast;
 
 import java.util.List;
 
-/** Settings page: Xray on/off, proxy subscription, API base, low-quality stream, connectivity test. */
+/** Settings page: account login, Xray on/off, proxy subscription, API base, low-quality stream, connectivity test. */
 final class SettingsScreen {
     private final Activity activity;
     private final ScrollView root;
+    private final LinearLayout accountBox;
     private final TextView xrayStatus;
     private final TextView testResult;
     private final Button testButton;
@@ -46,6 +48,10 @@ final class SettingsScreen {
         col.setOrientation(LinearLayout.VERTICAL);
         col.setPadding(pad, pad, pad, pad);
         root.addView(col, new ScrollView.LayoutParams(-1, -2));
+
+        // --- Account -----------------------------------------------------
+        accountBox = card(col);
+        refreshAccount();
 
         // --- Xray toggle -------------------------------------------------
         LinearLayout card1 = card(col);
@@ -193,6 +199,94 @@ final class SettingsScreen {
         t.setTextColor(Ui.SUB);
         t.setPadding(0, Ui.dp(activity, 6), 0, 0);
         return t;
+    }
+
+    /** Rebuilds the account card: login form when signed out, user name + logout when signed in. */
+    private void refreshAccount() {
+        accountBox.removeAllViews();
+        TextView title = new TextView(activity);
+        title.setText("账号");
+        title.setTextSize(16);
+        title.setTextColor(Ui.TEXT);
+        accountBox.addView(title);
+
+        if (AuthStore.loggedIn()) {
+            TextView who = note("已登录：" + AuthStore.name());
+            who.setTextSize(14);
+            who.setTextColor(Ui.TEXT);
+            accountBox.addView(who);
+            Button logout = new Button(activity);
+            logout.setText("退出登录");
+            logout.setAllCaps(false);
+            logout.setOnClickListener(v -> {
+                AuthStore.clear();
+                refreshAccount();
+                Toast.makeText(activity, "已退出登录", Toast.LENGTH_SHORT).show();
+            });
+            accountBox.addView(logout);
+            return;
+        }
+
+        accountBox.addView(note("使用 asmr.one 网站的账号登录。只保存登录凭证，不保存密码；"
+                + "凭证只会发送给下方设置的 API 地址。"));
+        final EditText userEt = new EditText(activity);
+        userEt.setSingleLine(true);
+        userEt.setHint("用户名（至少 5 个字符）");
+        userEt.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        userEt.setImeOptions(EditorInfo.IME_ACTION_NEXT);
+        accountBox.addView(userEt, new LinearLayout.LayoutParams(-1, -2));
+
+        final EditText passEt = new EditText(activity);
+        passEt.setSingleLine(true);
+        passEt.setHint("密码");
+        passEt.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        passEt.setImeOptions(EditorInfo.IME_ACTION_DONE);
+        accountBox.addView(passEt, new LinearLayout.LayoutParams(-1, -2));
+
+        final TextView status = note("");
+        final Button login = new Button(activity);
+        login.setText("登录");
+        login.setAllCaps(false);
+        login.setOnClickListener(v -> runLogin(userEt, passEt, login, status));
+        passEt.setOnEditorActionListener((tv, action, ev) -> {
+            if (action == EditorInfo.IME_ACTION_DONE) {
+                runLogin(userEt, passEt, login, status);
+                return true;
+            }
+            return false;
+        });
+        accountBox.addView(login);
+        accountBox.addView(status);
+    }
+
+    private void runLogin(EditText userEt, EditText passEt, Button btn, TextView status) {
+        final String name = userEt.getText().toString().trim();
+        final String pass = passEt.getText().toString(); // not trimmed: spaces may be part of a password
+        if (name.length() < 5) { status.setText("用户名长度至少为 5"); return; }
+        if (pass.isEmpty()) { status.setText("请输入密码"); return; }
+        if (!btn.isEnabled()) return; // a login is already in flight (e.g. IME "done" pressed twice)
+        btn.setEnabled(false);
+        status.setText("登录中…（" + (AppSettings.useXray() ? "经 Xray" : "直连") + "）");
+        Thread t = new Thread(() -> {
+            String error = null;
+            try {
+                AsmrApi.login(name, pass);
+            } catch (Throwable e) {
+                error = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+            }
+            final String fail = error;
+            activity.runOnUiThread(() -> {
+                if (fail == null) {
+                    refreshAccount(); // swaps the form for the signed-in view, which also drops the password field
+                    Toast.makeText(activity, "登录成功", Toast.LENGTH_SHORT).show();
+                } else {
+                    btn.setEnabled(true);
+                    status.setText("登录失败：" + fail);
+                }
+            });
+        }, "login");
+        t.setDaemon(true);
+        t.start();
     }
 
     /** Rebuilds the node list from {@link SubscriptionStore}; tapping a row selects that node. */
