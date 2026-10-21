@@ -21,6 +21,24 @@ final class AsmrApi {
         final List<String> vas = new ArrayList<>();
         String thumbUrl;
         String coverUrl;
+        // Only filled for items coming from the "my progress" (/api/review) lists.
+        String progress = "";  // marked | listening | listened | replay | postponed
+        int userRating;        // 1..5, 0 = not rated
+        String updatedAt = ""; // date the progress mark was last changed (yyyy-MM-dd)
+    }
+
+    /** The progress states of the site's "我的进度" page: API filter value → label. */
+    static final String[][] PROGRESS_FILTERS = {
+            {"marked", "想听"},
+            {"listening", "在听"},
+            {"listened", "听过"},
+            {"replay", "重听"},
+            {"postponed", "搁置"},
+    };
+
+    static String progressLabel(String progress) {
+        for (String[] f : PROGRESS_FILTERS) if (f[0].equals(progress)) return f[1];
+        return "";
     }
 
     static final class Page {
@@ -94,7 +112,24 @@ final class AsmrApi {
     static Page works(int page) throws Exception {
         String url = AppSettings.apiBase()
                 + "/api/works?order=create_date&sort=desc&page=" + page + "&pageSize=20&subtitle=0";
-        JSONObject j = new JSONObject(apiGet(url));
+        return parsePage(new JSONObject(apiGet(url)));
+    }
+
+    /**
+     * The logged-in user's "我的进度" list (GET /api/review).
+     *
+     * @param filter one of {@link #PROGRESS_FILTERS}[i][0] (marked/listening/listened/replay/postponed)
+     * @param order  sort field: updated_at (marked time), userRating, release, rate_average_2dp, dl_count, price…
+     * @param desc   sort direction
+     */
+    static Page progress(String filter, String order, boolean desc, int page) throws Exception {
+        if (!AuthStore.loggedIn()) throw new IOException("请先在设置中登录后查看进度");
+        String url = AppSettings.apiBase() + "/api/review?order=" + order + "&sort=" + (desc ? "desc" : "asc")
+                + "&page=" + page + "&pageSize=20&subtitle=0&filter=" + filter;
+        return parsePage(new JSONObject(apiGet(url)));
+    }
+
+    private static Page parsePage(JSONObject j) throws Exception {
         JSONArray arr = j.getJSONArray("works");
         Page p = new Page();
         JSONObject pg = j.optJSONObject("pagination");
@@ -109,6 +144,9 @@ final class AsmrApi {
             w.circle = c != null ? c.optString("name", "") : o.optString("name", "");
             w.duration = o.optInt("duration", 0);
             w.hasSubtitle = o.optBoolean("has_subtitle", false);
+            w.progress = o.isNull("progress") ? "" : o.optString("progress", "");
+            w.userRating = o.isNull("userRating") ? 0 : o.optInt("userRating", 0);
+            w.updatedAt = o.isNull("updated_at") ? "" : o.optString("updated_at", "");
             JSONArray vas = o.optJSONArray("vas");
             if (vas != null) {
                 for (int k = 0; k < vas.length(); k++) {

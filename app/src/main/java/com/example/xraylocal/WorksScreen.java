@@ -14,9 +14,13 @@ import android.widget.TextView;
 import java.util.ArrayList;
 import java.util.List;
 
-/** Grid of works (thumbnail + title) with endless paging. */
+/** Grid of works (thumbnail + title) with endless paging. The data source is pluggable via {@link Loader}. */
 final class WorksScreen {
     interface OnOpen { void open(AsmrApi.Work work); }
+    /** Loads one page (1-based). Called on a background thread. */
+    interface Loader { AsmrApi.Page load(int page) throws Exception; }
+    /** Reports the server-side total after a page loaded; -1 while unknown (reloading / failed). */
+    interface OnTotal { void total(int total); }
 
     private final Activity activity;
     private final OnOpen onOpen;
@@ -26,6 +30,8 @@ final class WorksScreen {
     private final List<AsmrApi.Work> items = new ArrayList<>();
     private final Adapter adapter = new Adapter();
 
+    private Loader loader;
+    private OnTotal onTotal;
     private int nextPage = 1;
     private boolean loading;
     private boolean end;
@@ -33,8 +39,13 @@ final class WorksScreen {
     private int gen;
 
     WorksScreen(Activity activity, OnOpen onOpen) {
+        this(activity, onOpen, AsmrApi::works);
+    }
+
+    WorksScreen(Activity activity, OnOpen onOpen, Loader loader) {
         this.activity = activity;
         this.onOpen = onOpen;
+        this.loader = loader;
         int pad = Ui.dp(activity, 8);
 
         root = new FrameLayout(activity);
@@ -72,6 +83,11 @@ final class WorksScreen {
 
     View view() { return root; }
 
+    void setOnTotal(OnTotal l) { onTotal = l; }
+
+    /** Swap the data source (e.g. another filter/sort). Call {@link #reload()} afterwards. */
+    void setLoader(Loader l) { loader = l; }
+
     void reload() {
         gen++;
         items.clear();
@@ -80,7 +96,12 @@ final class WorksScreen {
         loading = false;
         total = 0;
         adapter.notifyDataSetChanged();
+        reportTotal(-1);
         loadMore();
+    }
+
+    private void reportTotal(int n) {
+        if (onTotal != null) onTotal.total(n);
     }
 
     private void loadMore() {
@@ -88,10 +109,11 @@ final class WorksScreen {
         loading = true;
         final int myGen = gen;
         final int page = nextPage;
+        final Loader ld = loader;
         if (items.isEmpty()) showStatus("加载中…");
         Thread t = new Thread(() -> {
             try {
-                final AsmrApi.Page p = AsmrApi.works(page);
+                final AsmrApi.Page p = ld.load(page);
                 activity.runOnUiThread(() -> {
                     if (myGen != gen) return;
                     items.addAll(p.works);
@@ -102,6 +124,7 @@ final class WorksScreen {
                     adapter.notifyDataSetChanged();
                     status.setVisibility(items.isEmpty() ? View.VISIBLE : View.GONE);
                     if (items.isEmpty()) status.setText("没有内容");
+                    reportTotal(total);
                 });
             } catch (final Throwable e) {
                 activity.runOnUiThread(() -> {
@@ -145,6 +168,15 @@ final class WorksScreen {
             if (w.duration > 0) sub.append(" · ").append(Ui.duration(w.duration));
             if (w.hasSubtitle) sub.append(" · 字幕");
             c.sub.setText(sub);
+            if (w.progress.isEmpty()) {
+                c.mark.setVisibility(View.GONE);
+            } else {
+                StringBuilder m = new StringBuilder(AsmrApi.progressLabel(w.progress));
+                if (!w.updatedAt.isEmpty()) m.append(" · ").append(w.updatedAt);
+                if (w.userRating > 0) m.append(" · ★").append(w.userRating);
+                c.mark.setText(m);
+                c.mark.setVisibility(View.VISIBLE);
+            }
             ImageLoader.load(c.image, w.thumbUrl);
             return convert;
         }
@@ -155,6 +187,7 @@ final class WorksScreen {
         final Ui.RatioImageView image;
         final TextView title;
         final TextView sub;
+        final TextView mark;
 
         Cell() {
             int p = Ui.dp(activity, 8);
@@ -181,6 +214,18 @@ final class WorksScreen {
             sub.setEllipsize(android.text.TextUtils.TruncateAt.END);
             sub.setPadding(p, Ui.dp(activity, 2), p, p);
             root.addView(sub, new LinearLayout.LayoutParams(-1, -2));
+
+            // Third line, only visible for progress-list items. Pulled up into sub's bottom padding.
+            mark = new TextView(activity);
+            mark.setTextColor(Ui.ACCENT);
+            mark.setTextSize(11);
+            mark.setSingleLine(true);
+            mark.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            mark.setPadding(p, 0, p, p);
+            LinearLayout.LayoutParams mp = new LinearLayout.LayoutParams(-1, -2);
+            mp.topMargin = -(p - Ui.dp(activity, 2));
+            root.addView(mark, mp);
+            mark.setVisibility(View.GONE);
         }
     }
 }

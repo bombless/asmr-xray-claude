@@ -15,7 +15,7 @@ import android.widget.TextView;
 import java.util.ArrayList;
 
 /**
- * Single-activity shell: top bar + content stack (works grid → work detail / settings) + mini player.
+ * Single-activity shell: top bar + content stack (works grid → work detail / settings / my progress) + mini player.
  * All networking goes through {@link Net}, which honours the Xray toggle in {@link AppSettings}.
  */
 public class MainActivity extends Activity {
@@ -23,6 +23,7 @@ public class MainActivity extends Activity {
         View view;
         String title;
         DetailScreen detail;
+        ProgressScreen progress;
         boolean isSettings;
         int settingsRev;
     }
@@ -31,6 +32,7 @@ public class MainActivity extends Activity {
     private FrameLayout content;
     private TextView titleView;
     private Button backButton;
+    private Button progressButton;
     private Button settingsButton;
     private WorksScreen works;
 
@@ -83,6 +85,10 @@ public class MainActivity extends Activity {
         tp.leftMargin = Ui.dp(this, 8);
         bar.addView(titleView, tp);
 
+        progressButton = flatButton("进度", 15);
+        progressButton.setOnClickListener(v -> openProgress());
+        bar.addView(progressButton, new LinearLayout.LayoutParams(Ui.dp(this, 52), -1));
+
         settingsButton = flatButton("⚙", 20);
         settingsButton.setOnClickListener(v -> openSettings());
         bar.addView(settingsButton, new LinearLayout.LayoutParams(Ui.dp(this, 52), -1));
@@ -113,6 +119,17 @@ public class MainActivity extends Activity {
         push(s);
     }
 
+    private void openProgress() {
+        if (!stack.isEmpty() && stack.get(stack.size() - 1).progress != null) return;
+        ProgressScreen p = new ProgressScreen(this, this::openDetail);
+        Screen s = new Screen();
+        s.view = p.view();
+        s.title = "我的进度";
+        s.progress = p;
+        push(s);
+        p.reload();
+    }
+
     private void openSettings() {
         if (!stack.isEmpty() && stack.get(stack.size() - 1).isSettings) return;
         SettingsScreen st = new SettingsScreen(this);
@@ -133,8 +150,11 @@ public class MainActivity extends Activity {
         if (stack.size() <= 1) return;
         Screen s = stack.remove(stack.size() - 1);
         if (s.detail != null) s.detail.destroy();
-        // Changing the Xray switch / API base invalidates what is on screen: reload the list.
-        if (s.isSettings && AppSettings.rev() != s.settingsRev) works.reload();
+        // Changing the Xray switch / API base / login invalidates what is on screen: reload the lists.
+        if (s.isSettings && AppSettings.rev() != s.settingsRev) {
+            works.reload();
+            for (Screen o : stack) if (o.progress != null) o.progress.reload();
+        }
         render();
     }
 
@@ -153,6 +173,7 @@ public class MainActivity extends Activity {
         titleView.setText(top.title);
         backButton.setVisibility(stack.size() > 1 ? View.VISIBLE : View.INVISIBLE);
         settingsButton.setVisibility(top.isSettings ? View.INVISIBLE : View.VISIBLE);
+        progressButton.setVisibility(top.isSettings || top.progress != null ? View.INVISIBLE : View.VISIBLE);
     }
 
     @Override public void onBackPressed() {
